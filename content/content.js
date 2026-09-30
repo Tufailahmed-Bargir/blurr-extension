@@ -34,6 +34,7 @@
     radiusPx: 12,
     drawing: false,
     startClient: null,
+    dragging: null, // { el, startX, startY, startLeft, startTop, startScrollX, startScrollY }
     currentSelectionInfo: null
   };
 
@@ -106,7 +107,17 @@
           inset 0 1px 0 rgba(255,255,255,0.22);
         z-index: ${Z - 10};
         pointer-events: auto;
+        cursor: grab;
+        user-select: none;
       }
+      .ab-blur-block.ab-dragging{
+        cursor: grabbing;
+        outline: 2px solid rgba(140,90,255,0.85);
+        box-shadow:
+          0 18px 45px rgba(0,0,0,0.28),
+          inset 0 1px 0 rgba(255,255,255,0.22);
+      }
+      html.ab-remove-mode .ab-blur-block{ cursor: pointer; }
       .ab-text-blur{
         display:inline;
         filter: blur(var(--ab-radius));
@@ -397,7 +408,7 @@
     const tools = createEl("div", { class: "tools" });
 
     const toolButtons = {
-      rect: makeToolButton("Rectangle Blur", "Drag to blur a region."),
+      rect: makeToolButton("Rectangle Blur", "Drag to blur. Drag a blur to move it."),
       text: makeToolButton("Text Blur", "Select text to blur it."),
       remove: makeToolButton("Remove", "Click blur to delete.")
     };
@@ -412,6 +423,7 @@
     const hint = createEl("div", { class: "hint" });
     hint.innerHTML = `
       • Rectangle Blur: click-drag on the page.<br>
+      • Move: drag an existing blur box anywhere (<span class="kbd">Esc</span> cancels).<br>
       • Text Blur: highlight text, then release mouse.<br>
       • Remove: hover/click a blur to remove it.<br><br>
       Shortcut: <span class="kbd">Alt</span> + <span class="kbd">B</span>
@@ -535,6 +547,7 @@
 
   function setTool(tool){
     STATE.tool = tool;
+    document.documentElement.classList.toggle("ab-remove-mode", tool === "remove");
     mountUI().updateActiveTool();
     if(tool === "rect"){
       enableDrawingOverlay();
@@ -566,6 +579,13 @@
       if(e.button !== 0) return;
       if(isEditableTarget(e.target)) return;
 
+      // Pressing on an existing blur moves it instead of drawing a new one
+      const hit = blurBlockAt(e.clientX, e.clientY);
+      if(hit){
+        startDrag(hit, e);
+        return;
+      }
+
       STATE.drawing = true;
       STATE.startClient = { x: e.clientX, y: e.clientY };
       box.style.display = "block";
@@ -577,7 +597,10 @@
     });
 
     overlay.addEventListener("mousemove", (e) => {
-      if(!STATE.drawing) return;
+      if(!STATE.drawing){
+        if(!STATE.dragging) overlay.style.cursor = blurBlockAt(e.clientX, e.clientY) ? "grab" : "";
+        return;
+      }
       const x0 = STATE.startClient.x;
       const y0 = STATE.startClient.y;
       const x1 = e.clientX;
@@ -617,14 +640,108 @@
       toast("Rectangle blur added.");
     });
 
-    // Escape cancels drawing
+    // Escape cancels drawing or dragging
     window.addEventListener("keydown", (e) => {
-      if(e.key === "Escape" && STATE.drawing){
+      if(e.key !== "Escape") return;
+      if(STATE.drawing){
         STATE.drawing = false;
         box.style.display = "none";
         toast("Canceled.");
+      }else if(STATE.dragging){
+        endDrag(true);
+        toast("Move canceled.");
       }
     }, true);
+  }
+
+  /* ---------- Dragging blur blocks ---------- */
+
+  // Topmost blur block under a viewport point (the draw overlay covers blocks, so hit-test manually)
+  function blurBlockAt(x, y){
+    const blocks = document.querySelectorAll(".ab-blur-block");
+    for(let i = blocks.length - 1; i >= 0; i--){
+      const r = blocks[i].getBoundingClientRect();
+      if(x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return blocks[i];
+    }
+    return null;
+  }
+
+  function startDrag(el, e){
+    e.preventDefault();
+    e.stopPropagation();
+
+    STATE.dragging = {
+      el,
+      startX: e.clientX,
+      startY: e.clientY,
+      startLeft: parseFloat(el.style.left) || 0,
+      startTop: parseFloat(el.style.top) || 0,
+      startScrollX: window.scrollX,
+      startScrollY: window.scrollY,
+      lastX: e.clientX,
+      lastY: e.clientY
+    };
+
+    // Bring to front so it stays on top of overlapping blurs
+    el.parentNode.appendChild(el);
+    el.classList.add("ab-dragging");
+    if(overlay) overlay.style.cursor = "grabbing";
+
+    window.addEventListener("mousemove", onDragMove, true);
+    window.addEventListener("mouseup", onDragEnd, true);
+    window.addEventListener("scroll", onDragScroll, true);
+  }
+
+  function positionDragged(){
+    const d = STATE.dragging;
+    const el = d.el;
+    const w = el.offsetWidth;
+    const h = el.offsetHeight;
+    const docEl = document.documentElement;
+    const maxLeft = Math.max(0, Math.max(docEl.scrollWidth, document.body.scrollWidth) - w);
+    const maxTop = Math.max(0, Math.max(docEl.scrollHeight, document.body.scrollHeight) - h);
+
+    const left = d.startLeft + (d.lastX - d.startX) + (window.scrollX - d.startScrollX);
+    const top = d.startTop + (d.lastY - d.startY) + (window.scrollY - d.startScrollY);
+
+    el.style.left = `${clamp(left, 0, maxLeft)}px`;
+    el.style.top = `${clamp(top, 0, maxTop)}px`;
+  }
+
+  function onDragMove(e){
+    if(!STATE.dragging) return;
+    STATE.dragging.lastX = e.clientX;
+    STATE.dragging.lastY = e.clientY;
+    positionDragged();
+    e.preventDefault();
+  }
+
+  // Keep the block under the cursor if the page scrolls mid-drag (e.g. mouse wheel)
+  function onDragScroll(){
+    if(STATE.dragging) positionDragged();
+  }
+
+  function onDragEnd(e){
+    if(!STATE.dragging) return;
+    e.preventDefault();
+    e.stopPropagation();
+    endDrag(false);
+  }
+
+  function endDrag(revert){
+    const d = STATE.dragging;
+    if(!d) return;
+    if(revert){
+      d.el.style.left = `${d.startLeft}px`;
+      d.el.style.top = `${d.startTop}px`;
+    }
+    d.el.classList.remove("ab-dragging");
+    if(overlay) overlay.style.cursor = "";
+    STATE.dragging = null;
+
+    window.removeEventListener("mousemove", onDragMove, true);
+    window.removeEventListener("mouseup", onDragEnd, true);
+    window.removeEventListener("scroll", onDragScroll, true);
   }
 
   function enableDrawingOverlay(){
@@ -660,6 +777,11 @@
       if(STATE.tool === "remove") el.classList.add("ab-remove-hover");
     });
     el.addEventListener("mouseleave", () => el.classList.remove("ab-remove-hover"));
+    // Direct drag when the draw overlay isn't covering the block (sidebar closed, text tool)
+    el.addEventListener("mousedown", (e) => {
+      if(e.button !== 0 || STATE.tool === "remove") return;
+      startDrag(el, e);
+    });
     el.addEventListener("click", (e) => {
       if(STATE.tool !== "remove") return;
       el.remove();
