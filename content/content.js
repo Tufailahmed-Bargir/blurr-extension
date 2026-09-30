@@ -118,6 +118,31 @@
           inset 0 1px 0 rgba(255,255,255,0.22);
       }
       html.ab-remove-mode .ab-blur-block{ cursor: pointer; }
+      .ab-blur-block .ab-handle{
+        position: absolute;
+        pointer-events: none;
+        opacity: 0;
+        transition: opacity .12s ease;
+        background: #fff;
+        border: 1.5px solid rgba(140,90,255,0.95);
+        box-shadow: 0 2px 6px rgba(0,0,0,0.35);
+      }
+      .ab-blur-block.ab-hover .ab-handle,
+      .ab-blur-block.ab-dragging .ab-handle{ opacity: 1; }
+      html.ab-remove-mode .ab-blur-block .ab-handle{ opacity: 0; }
+      .ab-handle-nw, .ab-handle-ne, .ab-handle-sw, .ab-handle-se{
+        width: 10px; height: 10px; border-radius: 50%;
+      }
+      .ab-handle-nw{ left: -5px; top: -5px; }
+      .ab-handle-ne{ right: -5px; top: -5px; }
+      .ab-handle-sw{ left: -5px; bottom: -5px; }
+      .ab-handle-se{ right: -5px; bottom: -5px; }
+      .ab-handle-n, .ab-handle-s{ width: 18px; height: 6px; left: calc(50% - 9px); border-radius: 3px; }
+      .ab-handle-e, .ab-handle-w{ width: 6px; height: 18px; top: calc(50% - 9px); border-radius: 3px; }
+      .ab-handle-n{ top: -3px; }
+      .ab-handle-s{ bottom: -3px; }
+      .ab-handle-e{ right: -3px; }
+      .ab-handle-w{ left: -3px; }
       .ab-text-blur{
         display:inline;
         filter: blur(var(--ab-radius));
@@ -408,7 +433,7 @@
     const tools = createEl("div", { class: "tools" });
 
     const toolButtons = {
-      rect: makeToolButton("Rectangle Blur", "Drag to blur. Drag a blur to move it."),
+      rect: makeToolButton("Rectangle Blur", "Drag to blur. Move or resize blurs."),
       text: makeToolButton("Text Blur", "Select text to blur it."),
       remove: makeToolButton("Remove", "Click blur to delete.")
     };
@@ -423,7 +448,8 @@
     const hint = createEl("div", { class: "hint" });
     hint.innerHTML = `
       • Rectangle Blur: click-drag on the page.<br>
-      • Move: drag an existing blur box anywhere (<span class="kbd">Esc</span> cancels).<br>
+      • Move: drag the middle of a blur box anywhere.<br>
+      • Resize: drag a blur box's edge or corner (<span class="kbd">Esc</span> cancels).<br>
       • Text Blur: highlight text, then release mouse.<br>
       • Remove: hover/click a blur to remove it.<br><br>
       Shortcut: <span class="kbd">Alt</span> + <span class="kbd">B</span>
@@ -579,10 +605,10 @@
       if(e.button !== 0) return;
       if(isEditableTarget(e.target)) return;
 
-      // Pressing on an existing blur moves it instead of drawing a new one
-      const hit = blurBlockAt(e.clientX, e.clientY);
+      // Pressing on an existing blur moves it (body) or resizes it (edge/corner) instead of drawing
+      const hit = blurHitAt(e.clientX, e.clientY);
       if(hit){
-        startDrag(hit, e);
+        startDrag(hit.el, hit.edges, e);
         return;
       }
 
@@ -598,7 +624,11 @@
 
     overlay.addEventListener("mousemove", (e) => {
       if(!STATE.drawing){
-        if(!STATE.dragging) overlay.style.cursor = blurBlockAt(e.clientX, e.clientY) ? "grab" : "";
+        if(!STATE.dragging){
+          const hit = blurHitAt(e.clientX, e.clientY);
+          overlay.style.cursor = hit ? EDGE_CURSORS[hit.edges] : "";
+          setHoveredBlock(hit ? hit.el : null);
+        }
         return;
       }
       const x0 = STATE.startClient.x;
@@ -648,34 +678,66 @@
         box.style.display = "none";
         toast("Canceled.");
       }else if(STATE.dragging){
+        const resizing = !!STATE.dragging.edges;
         endDrag(true);
-        toast("Move canceled.");
+        toast(resizing ? "Resize canceled." : "Move canceled.");
       }
     }, true);
   }
 
-  /* ---------- Dragging blur blocks ---------- */
+  /* ---------- Moving & resizing blur blocks ---------- */
+
+  const MIN_BLOCK = 16;  // smallest size a blur can be resized to
+  const GRIP_OUT = 6;    // grab zone that extends outside the block edge
+  const EDGE_CURSORS = {
+    n: "ns-resize", s: "ns-resize", e: "ew-resize", w: "ew-resize",
+    nw: "nwse-resize", se: "nwse-resize", ne: "nesw-resize", sw: "nesw-resize",
+    "": "grab"
+  };
+
+  // Which edges of a rect a point grabs: "" = body (move), otherwise e.g. "n", "se"
+  function edgesAt(r, x, y){
+    const grip = Math.min(10, r.width / 4, r.height / 4);
+    let v = "", h = "";
+    if(y <= r.top + grip) v = "n";
+    else if(y >= r.bottom - grip) v = "s";
+    if(x <= r.left + grip) h = "w";
+    else if(x >= r.right - grip) h = "e";
+    return v + h;
+  }
 
   // Topmost blur block under a viewport point (the draw overlay covers blocks, so hit-test manually)
-  function blurBlockAt(x, y){
+  function blurHitAt(x, y){
     const blocks = document.querySelectorAll(".ab-blur-block");
     for(let i = blocks.length - 1; i >= 0; i--){
       const r = blocks[i].getBoundingClientRect();
-      if(x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return blocks[i];
+      if(x >= r.left - GRIP_OUT && x <= r.right + GRIP_OUT && y >= r.top - GRIP_OUT && y <= r.bottom + GRIP_OUT){
+        return { el: blocks[i], edges: edgesAt(r, x, y) };
+      }
     }
     return null;
   }
 
-  function startDrag(el, e){
+  function setHoveredBlock(el){
+    document.querySelectorAll(".ab-blur-block.ab-hover").forEach(b => {
+      if(b !== el) b.classList.remove("ab-hover");
+    });
+    if(el) el.classList.add("ab-hover");
+  }
+
+  function startDrag(el, edges, e){
     e.preventDefault();
     e.stopPropagation();
 
     STATE.dragging = {
       el,
+      edges,
       startX: e.clientX,
       startY: e.clientY,
       startLeft: parseFloat(el.style.left) || 0,
       startTop: parseFloat(el.style.top) || 0,
+      startWidth: el.offsetWidth,
+      startHeight: el.offsetHeight,
       startScrollX: window.scrollX,
       startScrollY: window.scrollY,
       lastX: e.clientX,
@@ -685,7 +747,9 @@
     // Bring to front so it stays on top of overlapping blurs
     el.parentNode.appendChild(el);
     el.classList.add("ab-dragging");
-    if(overlay) overlay.style.cursor = "grabbing";
+    const cursor = edges ? EDGE_CURSORS[edges] : "grabbing";
+    document.documentElement.style.setProperty("cursor", cursor, "important");
+    if(overlay) overlay.style.cursor = cursor;
 
     window.addEventListener("mousemove", onDragMove, true);
     window.addEventListener("mouseup", onDragEnd, true);
@@ -695,17 +759,37 @@
   function positionDragged(){
     const d = STATE.dragging;
     const el = d.el;
-    const w = el.offsetWidth;
-    const h = el.offsetHeight;
     const docEl = document.documentElement;
-    const maxLeft = Math.max(0, Math.max(docEl.scrollWidth, document.body.scrollWidth) - w);
-    const maxTop = Math.max(0, Math.max(docEl.scrollHeight, document.body.scrollHeight) - h);
+    const docW = Math.max(docEl.scrollWidth, document.body.scrollWidth);
+    const docH = Math.max(docEl.scrollHeight, document.body.scrollHeight);
 
-    const left = d.startLeft + (d.lastX - d.startX) + (window.scrollX - d.startScrollX);
-    const top = d.startTop + (d.lastY - d.startY) + (window.scrollY - d.startScrollY);
+    const dx = (d.lastX - d.startX) + (window.scrollX - d.startScrollX);
+    const dy = (d.lastY - d.startY) + (window.scrollY - d.startScrollY);
 
-    el.style.left = `${clamp(left, 0, maxLeft)}px`;
-    el.style.top = `${clamp(top, 0, maxTop)}px`;
+    let left = d.startLeft, top = d.startTop, width = d.startWidth, height = d.startHeight;
+
+    if(!d.edges){
+      left = clamp(d.startLeft + dx, 0, Math.max(0, docW - width));
+      top = clamp(d.startTop + dy, 0, Math.max(0, docH - height));
+    }else{
+      const right = d.startLeft + d.startWidth;
+      const bottom = d.startTop + d.startHeight;
+      if(d.edges.includes("e")) width = clamp(d.startWidth + dx, MIN_BLOCK, Math.max(MIN_BLOCK, docW - d.startLeft));
+      if(d.edges.includes("w")){
+        left = clamp(d.startLeft + dx, 0, right - MIN_BLOCK);
+        width = right - left;
+      }
+      if(d.edges.includes("s")) height = clamp(d.startHeight + dy, MIN_BLOCK, Math.max(MIN_BLOCK, docH - d.startTop));
+      if(d.edges.includes("n")){
+        top = clamp(d.startTop + dy, 0, bottom - MIN_BLOCK);
+        height = bottom - top;
+      }
+    }
+
+    el.style.left = `${left}px`;
+    el.style.top = `${top}px`;
+    el.style.width = `${width}px`;
+    el.style.height = `${height}px`;
   }
 
   function onDragMove(e){
@@ -734,8 +818,11 @@
     if(revert){
       d.el.style.left = `${d.startLeft}px`;
       d.el.style.top = `${d.startTop}px`;
+      d.el.style.width = `${d.startWidth}px`;
+      d.el.style.height = `${d.startHeight}px`;
     }
     d.el.classList.remove("ab-dragging");
+    document.documentElement.style.removeProperty("cursor");
     if(overlay) overlay.style.cursor = "";
     STATE.dragging = null;
 
@@ -752,6 +839,7 @@
   function disableDrawingOverlay(){
     ensureOverlay();
     overlay.style.display = "none";
+    setHoveredBlock(null);
     STATE.drawing = false;
     box.style.display = "none";
   }
@@ -772,15 +860,25 @@
     el.style.backdropFilter = `blur(${STATE.radiusPx}px)`;
     el.style.webkitBackdropFilter = `blur(${STATE.radiusPx}px)`;
 
+    // Visual resize handles (purely decorative; hit-testing is geometric)
+    for(const pos of ["n", "s", "e", "w", "nw", "ne", "sw", "se"]){
+      el.appendChild(createEl("div", { class: `ab-handle ab-handle-${pos}` }));
+    }
+
     // Allow remove mode
     el.addEventListener("mouseenter", () => {
       if(STATE.tool === "remove") el.classList.add("ab-remove-hover");
+      else el.classList.add("ab-hover");
     });
-    el.addEventListener("mouseleave", () => el.classList.remove("ab-remove-hover"));
-    // Direct drag when the draw overlay isn't covering the block (sidebar closed, text tool)
+    el.addEventListener("mouseleave", () => el.classList.remove("ab-remove-hover", "ab-hover"));
+    // Direct move/resize when the draw overlay isn't covering the block (sidebar closed, text tool)
+    el.addEventListener("mousemove", (e) => {
+      if(STATE.dragging) return;
+      el.style.cursor = STATE.tool === "remove" ? "" : EDGE_CURSORS[edgesAt(el.getBoundingClientRect(), e.clientX, e.clientY)];
+    });
     el.addEventListener("mousedown", (e) => {
       if(e.button !== 0 || STATE.tool === "remove") return;
-      startDrag(el, e);
+      startDrag(el, edgesAt(el.getBoundingClientRect(), e.clientX, e.clientY), e);
     });
     el.addEventListener("click", (e) => {
       if(STATE.tool !== "remove") return;
